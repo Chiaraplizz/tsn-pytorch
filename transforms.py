@@ -72,7 +72,6 @@ class GroupNormalize(object):
         # TODO: make efficient
         for t, m, s in zip(tensor, rep_mean, rep_std):
             t.sub_(m).div_(s)
-
         return tensor
 
 

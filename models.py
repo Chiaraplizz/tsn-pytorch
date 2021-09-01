@@ -1,11 +1,36 @@
 from torch import nn
-
 from ops.basic_ops import ConsensusModule, Identity
 from transforms import *
 from torch.nn.init import normal, constant
+from pytorch_i3d import InceptionI3d
+
+
+
+def load(double_BN, path):
+    state_dict = torch.load(path)
+    from collections import OrderedDict
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k  # [7:]  # remove `module.`
+        check_bn = name.split(".")
+
+        if "bn" in check_bn and double_BN:
+            print(" * Adapted weight for BN target")
+            new_name = name.replace("bn", "bn_target")
+            new_state_dict[new_name] = v
+            new_state_dict[name] = v
+        elif "logits" in check_bn:
+            print(" * Skipping Logits weight for \'{}\'".format(name))
+            pass
+        else:
+            # print(" * Param", name)
+            new_state_dict[name] = v
+
+        # load params
+    return new_state_dict
 
 class TSN(nn.Module):
-    def __init__(self, num_class, num_segments, modality,
+    def __init__(self, args, num_class, num_segments, modality,
                  base_model='resnet101', new_length=None,
                  consensus_type='avg', before_softmax=True,
                  dropout=0.8,
@@ -14,6 +39,7 @@ class TSN(nn.Module):
         self.modality = modality
         self.num_segments = num_segments
         self.reshape = True
+        self.args=args
         self.before_softmax = before_softmax
         self.dropout = dropout
         self.crop_num = crop_num
@@ -36,9 +62,10 @@ TSN Configurations:
     dropout_ratio:      {}
         """.format(base_model, self.modality, self.num_segments, self.new_length, consensus_type, self.dropout)))
 
-        self._prepare_base_model(base_model)
+        self._prepare_base_model(base_model, num_class)
 
-        feature_dim = self._prepare_tsn(num_class)
+        if base_model != 'i3d':
+            feature_dim = self._prepare_tsn(num_class)
 
         if self.modality == 'Flow':
             print("Converting the ImageNet model to a flow init model")
@@ -76,7 +103,7 @@ TSN Configurations:
             constant(self.new_fc.bias, 0)
         return feature_dim
 
-    def _prepare_base_model(self, base_model):
+    def _prepare_base_model(self, base_model, num_class):
 
         if 'resnet' in base_model or 'vgg' in base_model:
             self.base_model = getattr(torchvision.models, base_model)(True)
@@ -111,6 +138,28 @@ TSN Configurations:
             self.input_size = 299
             self.input_mean = [0.5]
             self.input_std = [0.5]
+
+        elif base_model=='i3d':
+            self.feature_dim = 1024
+            self.input_size = 224
+
+            if self.modality == 'RGB':
+                self.input_mean = [.485, .456, .406]
+                self.input_std = [.229, .224, .225]
+                path_weight = self.args.weight_i3d
+                channel = 3
+
+            i3d = InceptionI3d(num_classes=num_class,
+                               in_channels=channel,
+                               dropout_keep_prob=self.args.dropout,
+                               double_BN=False, args=self.args)
+            i3d.load_state_dict(load(False, path_weight), strict=False)
+            self.base_model = i3d
+            for name, param in self.base_model.named_parameters():
+                if name == 'logits.conv3d.weight' or name == 'logits.conv3d.bias':
+                    param.requires_grad = True
+                    if self.args.train_target:
+                        param.requires_grad = False
         else:
             raise ValueError('Unknown base model: {}'.format(base_model))
 
@@ -133,79 +182,111 @@ TSN Configurations:
                         m.weight.requires_grad = False
                         m.bias.requires_grad = False
 
+        ''' Freezing the last classification layer when training with target only '''
+        if self.args.train_target:
+            for m in self.base_model.modules():
+                if isinstance(m, nn.Linear):
+                    m.weight.requires_grad = False
+                    m.bias.requires_grad = False
+
     def partialBN(self, enable):
         self._enable_pbn = enable
 
     def get_optim_policies(self):
-        first_conv_weight = []
-        first_conv_bias = []
-        normal_weight = []
-        normal_bias = []
-        bn = []
+        if False:
+            first_conv_weight = []
+            first_conv_bias = []
+            normal_weight = []
+            normal_bias = []
+            bn = []
 
-        conv_cnt = 0
-        bn_cnt = 0
-        for m in self.modules():
-            if isinstance(m, torch.nn.Conv2d) or isinstance(m, torch.nn.Conv1d):
-                ps = list(m.parameters())
-                conv_cnt += 1
-                if conv_cnt == 1:
-                    first_conv_weight.append(ps[0])
-                    if len(ps) == 2:
-                        first_conv_bias.append(ps[1])
-                else:
+            conv_cnt = 0
+            bn_cnt = 0
+            for m in self.modules():
+                if isinstance(m, torch.nn.Conv2d) or isinstance(m, torch.nn.Conv1d):
+                    ps = list(m.parameters())
+                    conv_cnt += 1
+                    if conv_cnt == 1:
+                        first_conv_weight.append(ps[0])
+                        if len(ps) == 2:
+                            first_conv_bias.append(ps[1])
+                    else:
+                        normal_weight.append(ps[0])
+                        if len(ps) == 2:
+                            normal_bias.append(ps[1])
+                elif isinstance(m, torch.nn.Linear):
+                    ps = list(m.parameters())
                     normal_weight.append(ps[0])
                     if len(ps) == 2:
                         normal_bias.append(ps[1])
-            elif isinstance(m, torch.nn.Linear):
-                ps = list(m.parameters())
-                normal_weight.append(ps[0])
-                if len(ps) == 2:
-                    normal_bias.append(ps[1])
-                  
-            elif isinstance(m, torch.nn.BatchNorm1d):
-                bn.extend(list(m.parameters()))
-            elif isinstance(m, torch.nn.BatchNorm2d):
-                bn_cnt += 1
-                # later BN's are frozen
-                if not self._enable_pbn or bn_cnt == 1:
+
+                elif isinstance(m, torch.nn.BatchNorm1d):
                     bn.extend(list(m.parameters()))
-            elif len(m._modules) == 0:
-                if len(list(m.parameters())) > 0:
-                    raise ValueError("New atomic module type: {}. Need to give it a learning policy".format(type(m)))
+                elif isinstance(m, torch.nn.BatchNorm2d):
+                    bn_cnt += 1
+                    # later BN's are frozen
+                    if not self._enable_pbn or bn_cnt == 1:
+                        bn.extend(list(m.parameters()))
+                #elif len(m._modules) == 0:
+                #    print('')
+                    #if len(list(m.parameters())) > 0:
+                    #    raise ValueError("New atomic module type: {}. Need to give it a learning policy".format(type(m)))
 
-        return [
-            {'params': first_conv_weight, 'lr_mult': 5 if self.modality == 'Flow' else 1, 'decay_mult': 1,
-             'name': "first_conv_weight"},
-            {'params': first_conv_bias, 'lr_mult': 10 if self.modality == 'Flow' else 2, 'decay_mult': 0,
-             'name': "first_conv_bias"},
-            {'params': normal_weight, 'lr_mult': 1, 'decay_mult': 1,
-             'name': "normal_weight"},
-            {'params': normal_bias, 'lr_mult': 2, 'decay_mult': 0,
-             'name': "normal_bias"},
-            {'params': bn, 'lr_mult': 1, 'decay_mult': 0,
-             'name': "BN scale/shift"},
-        ]
+            return [
+                {'params': first_conv_weight, 'lr_mult': 5 if self.modality == 'Flow' else 1, 'decay_mult': 1,
+                 'name': "first_conv_weight"},
+                {'params': first_conv_bias, 'lr_mult': 10 if self.modality == 'Flow' else 2, 'decay_mult': 0,
+                 'name': "first_conv_bias"},
+                {'params': normal_weight, 'lr_mult': 1, 'decay_mult': 1,
+                 'name': "normal_weight"},
+                {'params': normal_bias, 'lr_mult': 2, 'decay_mult': 0,
+                 'name': "normal_bias"},
+                {'params': bn, 'lr_mult': 1, 'decay_mult': 0,
+                 'name': "BN scale/shift"},
+            ]
+        else:
+            '''
+            total_params = []
+            total_bias = []
+            for m in self.modules():
 
-    def forward(self, input):
+                ps = list(m.parameters())
+                if len(ps) > 0:
+                    total_params.append(ps[0])
+                    if len(ps) > 2:
+                        total_bias.append(ps[1])
+            '''
+
+
+            return [
+                {'params': list(self.base_model.parameters()), 'lr_mult': 5 if self.modality == 'Flow' else 1, 'decay_mult': 1,
+                 'name': "weights"},
+
+            ]
+
+    def forward(self, input, base_model='i3d'):
         sample_len = (3 if self.modality == "RGB" else 2) * self.new_length
 
         if self.modality == 'RGBDiff':
             sample_len = 3 * self.new_length
             input = self._get_diff(input)
 
-        base_out = self.base_model(input.view((-1, sample_len) + input.size()[-2:]))
+        if base_model == 'i3d':
+            output, _, _, _ = self.base_model(input, 16, False)
+        else:
+            base_out = self.base_model(input.view((-1, sample_len) + input.size()[-2:]))
 
-        if self.dropout > 0:
-            base_out = self.new_fc(base_out)
+            if self.dropout > 0:
+                base_out = self.new_fc(base_out)
 
-        if not self.before_softmax:
-            base_out = self.softmax(base_out)
-        if self.reshape:
-            base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
+            if not self.before_softmax:
+                base_out = self.softmax(base_out)
+            if self.reshape:
+                base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
 
-        output = self.consensus(base_out)
-        return output.squeeze(1)
+            output = self.consensus(base_out)
+            output=output.squeeze(1)
+        return output
 
     def _get_diff(self, input, keep_rgb=False):
         input_c = 3 if self.modality in ["RGB", "RGBDiff"] else 2

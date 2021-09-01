@@ -1,7 +1,9 @@
 import argparse
 parser = argparse.ArgumentParser(description="PyTorch implementation of Temporal Segment Networks")
-parser.add_argument('dataset', type=str, choices=['ucf101', 'hmdb51', 'kinetics'])
+parser.add_argument('dataset', type=str, choices=['full', 'small', 'kinetics'])
 parser.add_argument('modality', type=str, choices=['RGB', 'Flow', 'RGBDiff'])
+parser.add_argument('--shift', type=str, default='U-H',
+                    help='Shift. Format \'source-target\'')
 parser.add_argument('train_list', type=str)
 parser.add_argument('val_list', type=str)
 
@@ -33,11 +35,12 @@ parser.add_argument('--weight-decay', '--wd', default=5e-4, type=float,
 parser.add_argument('--clip-gradient', '--gd', default=None, type=float,
                     metavar='W', help='gradient norm clipping (default: disabled)')
 parser.add_argument('--no_partialbn', '--npb', default=False, action="store_true")
+parser.add_argument('--validate', '--val', default=False, action="store_true")
 
 # ========================= Monitor Configs ==========================
 parser.add_argument('--print-freq', '-p', default=20, type=int,
                     metavar='N', help='print frequency (default: 10)')
-parser.add_argument('--eval-freq', '-ef', default=5, type=int,
+parser.add_argument('--eval-freq', '-ef', default=10, type=int,
                     metavar='N', help='evaluation frequency (default: 5)')
 
 
@@ -53,10 +56,14 @@ parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('--gpus', nargs='+', type=int, default=None)
 parser.add_argument('--flow_prefix', default="", type=str)
-
-
-
-
+parser.add_argument('--train_target', action='store_true',
+                    help='active entropy')
+parser.add_argument('--entropy', type=float, default=0,
+                    help='active entropy')
+parser.add_argument('--g_ent', action='store_true',
+                    help='active entropy')
+parser.add_argument('--total-batch', default=0, type=int, metavar='N',
+                    help='manual epoch number (useful on restarts)')
 
 
 
