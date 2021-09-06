@@ -291,7 +291,7 @@ def validate(val_loader, model, criterion, iter, logger=None):
     model.eval()
 
     end = time.time()
-    class_accuracies = []
+    class_accuracies = list()
     for i, (input, target) in enumerate(val_loader):
         target = target.cuda()
         input_var = torch.autograd.Variable(input, volatile=True)
@@ -333,7 +333,7 @@ def validate(val_loader, model, criterion, iter, logger=None):
                 top1=top1, top5=top5)))
     class_accuracies.append([(x / y) * 100 for x, y in zip(top1.correct, top1.total)])
     print('----- END model!\ttop1 = %.2f%%\ttop5 = %.2f%%\nCLASS accuracy:' % (top1.avg, top5.avg))
-    for i_class, class_acc in enumerate(class_accuracies):
+    for i_class, class_acc in enumerate(class_accuracies[0]):
         print('Class %d = [%d/%d] = %.2f%%' % (i_class,
                                                int(top1.correct[i_class]),
                                                int(top1.total[i_class]),
